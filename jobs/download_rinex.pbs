@@ -1,0 +1,80 @@
+#!/bin/bash
+#PBS -N download_rinex
+#PBS -l select=1:ncpus=4:mem=4gb
+#PBS -l walltime=4:00:00
+#PBS -q default
+#PBS -P project-code
+#PBS -j oe
+
+# Download RINEX obs files from GA API and/or CDDIS for a date range.
+#
+# Required variables (pass via -v):
+#   START_DATE   YYYY-MM-DD
+#   END_DATE     YYYY-MM-DD
+#   STATIONS     Path to station list file
+#
+# Optional variables:
+#   WORK_ROOT          Base work directory (default: ~/work)
+#   RINEX_SOURCE       ga, cddis, or both (default: cddis)
+#   RINEX_WORKERS      Concurrent download workers (default: 16)
+#   DECOMPRESS         Decompress .crx.gz after download: true/false (default: false)
+#   DELETE_COMPRESSED  Delete .crx.gz after decompression: true/false (default: false)
+#   GINAN_ROOT         Path to Ginan installation (default: ~/projects/ginan)
+#   PROXY_URL          HTTP proxy for compute node internet access
+
+cd "$PBS_O_WORKDIR"
+
+if command -v module &>/dev/null; then
+    module load python/3.13.0-gcc-jd5
+fi
+
+VENV_PATH="${VENV_PATH:-$PBS_O_WORKDIR/env}"
+if [[ -f "${VENV_PATH}/bin/activate" ]]; then
+    source "${VENV_PATH}/bin/activate"
+fi
+
+if [[ -n "${PROXY_URL}" ]]; then
+    export http_proxy="${PROXY_URL}"
+    export https_proxy="${PROXY_URL}"
+fi
+
+if [[ -z "${START_DATE}" ]] || [[ -z "${END_DATE}" ]] || [[ -z "${STATIONS}" ]]; then
+    echo "ERROR: START_DATE, END_DATE, and STATIONS must be set"
+    echo "Usage: qsub -v START_DATE=2024-01-01,END_DATE=2024-01-31,STATIONS=stations.txt jobs/download_rinex.pbs"
+    exit 1
+fi
+
+WORK_ROOT="${WORK_ROOT:-$HOME/work}"
+RINEX_SOURCE="${RINEX_SOURCE:-cddis}"
+RINEX_WORKERS="${RINEX_WORKERS:-16}"
+DECOMPRESS="${DECOMPRESS:-false}"
+DELETE_COMPRESSED="${DELETE_COMPRESSED:-false}"
+GINAN_ROOT="${GINAN_ROOT:-$HOME/projects/ginan}"
+
+echo "Host: $(hostname)  Start: $(date)"
+echo "Dates: ${START_DATE} to ${END_DATE}  Stations: ${STATIONS}  Source: ${RINEX_SOURCE}"
+echo ""
+
+AUTO_DOWNLOAD="${GINAN_ROOT}/scripts/auto_download_PPP.py"
+if [[ ! -f "${AUTO_DOWNLOAD}" ]]; then
+    echo "ERROR: auto_download_PPP.py not found at ${AUTO_DOWNLOAD}"
+    echo "Set GINAN_ROOT to your Ginan installation directory."
+    exit 1
+fi
+
+cmd=(
+    python3 "${AUTO_DOWNLOAD}"
+    --target-dir "${WORK_ROOT}"
+    --rinex-data-dir "${WORK_ROOT}"
+    --station-list-file "${STATIONS}"
+    --start-datetime "${START_DATE}_00:00:00"
+    --end-datetime "${END_DATE}_00:00:00"
+    --rinex-source "${RINEX_SOURCE}"
+    --rinex-workers "${RINEX_WORKERS}"
+    --rinex-dated-dirs
+    --dont-replace
+)
+[[ "${DECOMPRESS}" == "true" ]] && cmd+=(--decompress)
+[[ "${DELETE_COMPRESSED}" == "true" ]] && cmd+=(--delete-compressed)
+
+"${cmd[@]}"

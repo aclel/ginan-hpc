@@ -1,0 +1,142 @@
+#!/bin/bash
+#PBS -N pea
+#PBS -l select=1:ncpus=1:mem=5GB
+#PBS -l walltime=00:15:00
+#PBS -q default
+#PBS -P default
+#PBS -j oe
+
+# -o path is set per-submission by submit_batch.py (points at ${WORK_ROOT}/${DATE}/logs/).
+# PBS writes stdout/stderr to the execution host's spool during the job (local I/O) and
+# copies once to -o at job end. This acts as a safety-net log if our exec-redirect fails.
+
+# Run ginan on RINEX files using PBS array jobs (one array per date)
+#
+# Reads station list from a per-date manifest CSV and processes each one.
+# Manifest format: station (one per line, with header)
+#
+# This script:
+#   1. Parses manifest for this array index to get STATION
+#   2. Redirects all output to ${WORK_ROOT}/${DATE}/logs/${STATION}.log IMMEDIATELY
+#      so any downstream failure (module load, venv, scratch, ginan) is captured.
+#   3. Sets up scratch, runs ginan, converts to parquet, cleans scratch
+#
+# Usage: qsub -J 1-N -v MANIFEST=/path/to/manifest_2024-01-01.csv,DATE=2024-01-01,WORK_ROOT=/path/to/work,PARQUET_OUTPUT_DIR=/path/to/parquet,REPO_ROOT=/path/to/repo,CONFIG_FILE=/path/to/config.yaml pea_array.pbs
+#
+# Required variables (passed via -v):
+#   MANIFEST: Path to CSV file with stations for this date
+#   DATE: Date to process (YYYY-MM-DD)
+#   WORK_ROOT: Base directory for work data (must contain DATE/data/STATION*.rnx files)
+#   PARQUET_OUTPUT_DIR: Directory to save parquet outputs
+#   REPO_ROOT: Repository root (contains save_outputs_parquet.py and patch_config.py)
+#   CONFIG_FILE: Ginan config file to use (will be patched with products for each date)
+
+# --- Bootstrap: identify this task and redirect output to permanent log ASAP ---
+# set -e is deliberately NOT enabled yet; we want to handle bootstrap errors
+# manually so that missing variables produce a diagnostic log instead of a
+# silent death (PBS -o is /dev/null).
+
+# Parse station from manifest before any other setup. Line 1 is header, so
+# the array index maps to line (PBS_ARRAY_INDEX + 1). Default index to 1
+# when unset so this script also works for non-array single-station jobs
+# (PBS rejects `-J 1-1`, so submit_batch.py omits -J when num_stations == 1).
+ARRAY_INDEX="${PBS_ARRAY_INDEX:-1}"
+LINE_NUM=$((ARRAY_INDEX + 1))
+LINE=$(sed -n "${LINE_NUM}p" "${MANIFEST}" 2>/dev/null)
+STATION=$(echo "${LINE}" | tr -d '\r')
+
+# Must have DATE, WORK_ROOT, and STATION to produce a log at all.
+if [ -z "${DATE}" ] || [ -z "${WORK_ROOT}" ] || [ -z "${STATION}" ]; then
+    # Nowhere to write — PBS -o is /dev/null. Best effort: drop a breadcrumb
+    # into a fallback location so the failure is not completely invisible.
+    FALLBACK="${WORK_ROOT:-$HOME}/pea_array_bootstrap_failures.log"
+    {
+        echo "[$(date)] BOOTSTRAP FAILURE on $(hostname)"
+        echo "  PBS_JOBID:        ${PBS_JOBID}"
+        echo "  PBS_ARRAY_INDEX:  ${PBS_ARRAY_INDEX}"
+        echo "  MANIFEST:         ${MANIFEST}"
+        echo "  LINE_NUM:         ${LINE_NUM}"
+        echo "  LINE:             ${LINE}"
+        echo "  DATE:             ${DATE}"
+        echo "  WORK_ROOT:        ${WORK_ROOT}"
+        echo "  STATION:          ${STATION}"
+    } >> "${FALLBACK}" 2>/dev/null
+    exit 1
+fi
+
+# Create log directory (permanent destination) and scratch log (fast local write).
+LOG_DIR="${WORK_ROOT}/${DATE}/logs"
+mkdir -p "${LOG_DIR}"
+LOG_FILE="${LOG_DIR}/${STATION}.log"
+> "${LOG_FILE}"  # truncate so this run's log replaces any previous content
+SCRATCH_LOG="${TMPDIR:-/tmp}/pea_${ARRAY_INDEX}.log"
+exec &> "${SCRATCH_LOG}"
+
+# Flush scratch log to permanent location on any exit — even early failures or qdel.
+early_flush() {
+    if [ -s "${SCRATCH_LOG}" ]; then
+        cat "${SCRATCH_LOG}" >> "${LOG_FILE}"
+    fi
+}
+trap early_flush EXIT TERM INT
+
+# From here on, every stdout/stderr line lands in the scratch log.
+set -e
+
+echo "date=${DATE} station=${STATION} node=$(hostname) start=$(date)"
+
+# Load Python module (only on HPC with module system)
+if command -v module &> /dev/null; then
+    module load python/3.13.0-gcc-jd5
+    module load $HOME/privatemodules/ginan/pea/v4.1.1
+fi
+
+# Sanitize PBS_JOBID by removing brackets, dots, and server suffix
+# Convert "8013[32].ws_32" to "8013_32"
+JOB_CLEAN=$(echo "${PBS_JOBID}" | tr -d '[].' | tr '_' '-' | cut -d'-' -f1,2)
+
+# Pick scratch base: SCRATCH_DIR_OVERRIDE (literal path or magic "TMPDIR") >
+# /dev/shm (if enough free) > $TMPDIR > /tmp.
+if [ "${SCRATCH_DIR_OVERRIDE}" = "TMPDIR" ]; then
+    SCRATCH_BASE="${TMPDIR:-/tmp}"
+elif [ -n "${SCRATCH_DIR_OVERRIDE}" ]; then
+    SCRATCH_BASE="${SCRATCH_DIR_OVERRIDE}"
+else
+    shm_free_mb=$(df -BM --output=avail /dev/shm 2>/dev/null | tail -1 | tr -dc '0-9')
+    if [ "${shm_free_mb:-0}" -ge "${REQUIRED_SCRATCH_MB:-3000}" ]; then
+        SCRATCH_BASE="/dev/shm"
+    else
+        SCRATCH_BASE="${TMPDIR:-/tmp}"
+    fi
+fi
+
+export SCRATCH_DIR="${SCRATCH_BASE}/ginan_${JOB_CLEAN}_${ARRAY_INDEX}"
+mkdir -p "${SCRATCH_DIR}"
+echo "Scratch: ${SCRATCH_DIR}"
+
+# Replace early trap with full cleanup: flush log first (so qdel/SIGKILL during
+# scratch removal still preserves the log), then remove scratch dir.
+cleanup() {
+    if [ -s "${SCRATCH_LOG}" ]; then
+        cat "${SCRATCH_LOG}" >> "${LOG_FILE}"
+    else
+        echo "[cleanup] WARNING: scratch log missing or empty: ${SCRATCH_LOG}" >> "${LOG_FILE}"
+    fi
+    echo "Cleaning up scratch: ${SCRATCH_DIR}" >> "${LOG_FILE}"
+    rm -rf "${SCRATCH_DIR}"
+}
+trap cleanup EXIT TERM INT
+
+# Activate Python virtual environment
+VENV_PATH=${VENV_PATH:-"$PBS_O_WORKDIR/env"}
+if [[ -f "${VENV_PATH}/bin/activate" ]]; then
+    source "${VENV_PATH}/bin/activate"
+    echo "Activated virtualenv: ${VENV_PATH}"
+else
+    echo "WARNING: Virtualenv not found at ${VENV_PATH}"
+fi
+
+# Run ginan with parquet conversion
+# Add scripts directory to PATH so we can find run_ginan.sh
+export PATH="${REPO_ROOT}/scripts:$PATH"
+run_ginan.sh "${DATE}" "${STATION}" "${WORK_ROOT}" "${PARQUET_OUTPUT_DIR}" "${REPO_ROOT}" "${CONFIG_FILE}" "${SCRATCH_DIR}"
