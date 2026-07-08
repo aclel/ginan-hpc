@@ -16,22 +16,37 @@ POS files:
 """
 
 import argparse
+import logging
 import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator, Literal, cast, overload
 
 import pandas as pd
 
 from gnssanalysis.gn_io import trace
 
+logger = logging.getLogger(__name__)
+
+ParquetEngine = Literal["auto", "pyarrow", "fastparquet"]
+
 
 @dataclass(slots=True)
 class RunConfig:
     output_dir: Path
-    engine: str | None
+    engine: str
     keep_raw_residuals: bool
+    quiet: bool
+
+
+@dataclass(frozen=True)
+class Args:
+    target: Path
+    output_dir: Path
+    engine: str
+    keep_raw_residuals: bool
+    recursive: bool
     quiet: bool
 
 
@@ -39,10 +54,39 @@ _STATION_PREFIX_RE = re.compile(r"^[A-Z0-9]{4}")
 
 # POS file lines to skip during parsing (header, column labels, comments)
 _POS_HEADER_PREFIXES = (
-    "#", "*", "PBO", "Format", "4-character", "First", "XYZ", "NEU",
-    "Start", "End", "YYYY", "X ", "Y ", "Z ", "Sx", "Sy", "Sz",
-    "Rxy", "Rxz", "Ryz", "Nlat", "Elong", "Height", "dN", "dE", "dU",
-    "Sn", "Se", "Su", "Rne", "Rnu", "Reu", "Soln",
+    "#",
+    "*",
+    "PBO",
+    "Format",
+    "4-character",
+    "First",
+    "XYZ",
+    "NEU",
+    "Start",
+    "End",
+    "YYYY",
+    "X ",
+    "Y ",
+    "Z ",
+    "Sx",
+    "Sy",
+    "Sz",
+    "Rxy",
+    "Rxz",
+    "Ryz",
+    "Nlat",
+    "Elong",
+    "Height",
+    "dN",
+    "dE",
+    "dU",
+    "Sn",
+    "Se",
+    "Su",
+    "Rne",
+    "Rnu",
+    "Reu",
+    "Soln",
 )
 
 
@@ -92,8 +136,8 @@ def find_pos_files(target: Path, recursive: bool = False) -> list[Path]:
 
 def parse_pos_file(path: Path) -> pd.DataFrame | None:
     """Parse a Ginan POS file into a DataFrame. Header metadata is stored in df.attrs."""
-    rows = []
-    metadata = {}
+    rows: list[dict[str, Any]] = []
+    metadata: dict[str, str | float] = {}
 
     with path.open("r", encoding="utf-8", errors="ignore") as f:
         for line in f:
@@ -132,32 +176,34 @@ def parse_pos_file(path: Path) -> pd.DataFrame | None:
                 parts = line.split()
                 if len(parts) >= 24:  # Ensure we have all expected columns
                     try:
-                        rows.append({
-                            "datetime": pd.to_datetime(parts[0]),
-                            "decimal_year": float(parts[1]),
-                            "X": float(parts[2]),
-                            "Y": float(parts[3]),
-                            "Z": float(parts[4]),
-                            "Sx": float(parts[5]),
-                            "Sy": float(parts[6]),
-                            "Sz": float(parts[7]),
-                            "Rxy": float(parts[8]),
-                            "Rxz": float(parts[9]),
-                            "Ryz": float(parts[10]),
-                            "Nlat": float(parts[11]),
-                            "Elong": float(parts[12]),
-                            "Height": float(parts[13]),
-                            "dN": float(parts[14]),
-                            "dE": float(parts[15]),
-                            "dU": float(parts[16]),
-                            "Sn": float(parts[17]),
-                            "Se": float(parts[18]),
-                            "Su": float(parts[19]),
-                            "Rne": float(parts[20]),
-                            "Rnu": float(parts[21]),
-                            "Reu": float(parts[22]),
-                            "soln": parts[23] if len(parts) > 23 else None,
-                        })
+                        rows.append(
+                            {
+                                "datetime": pd.to_datetime(parts[0]),
+                                "decimal_year": float(parts[1]),
+                                "X": float(parts[2]),
+                                "Y": float(parts[3]),
+                                "Z": float(parts[4]),
+                                "Sx": float(parts[5]),
+                                "Sy": float(parts[6]),
+                                "Sz": float(parts[7]),
+                                "Rxy": float(parts[8]),
+                                "Rxz": float(parts[9]),
+                                "Ryz": float(parts[10]),
+                                "Nlat": float(parts[11]),
+                                "Elong": float(parts[12]),
+                                "Height": float(parts[13]),
+                                "dN": float(parts[14]),
+                                "dE": float(parts[15]),
+                                "dU": float(parts[16]),
+                                "Sn": float(parts[17]),
+                                "Se": float(parts[18]),
+                                "Su": float(parts[19]),
+                                "Rne": float(parts[20]),
+                                "Rnu": float(parts[21]),
+                                "Reu": float(parts[22]),
+                                "soln": parts[23] if len(parts) > 23 else None,
+                            }
+                        )
                     except (ValueError, IndexError):
                         continue
 
@@ -165,10 +211,16 @@ def parse_pos_file(path: Path) -> pd.DataFrame | None:
         return None
 
     df = pd.DataFrame(rows)
-    df.attrs = metadata
+    # pandas-stubs types .attrs as Mapping[Hashable | None, Any]; our metadata
+    # dict (str keys only) is a valid value at runtime but not an exact match.
+    df.attrs = metadata  # type: ignore[assignment]
     return df
 
 
+@overload
+def _reset(df: pd.DataFrame) -> pd.DataFrame: ...
+@overload
+def _reset(df: None) -> None: ...
 def _reset(df: pd.DataFrame | None) -> pd.DataFrame | None:
     if df is None:
         return None
@@ -202,7 +254,7 @@ def _select_residual_paths(path: Path) -> tuple[list[Path], bool]:
 
 
 def build_network_frames(path: Path, config: RunConfig) -> dict[str, pd.DataFrame]:
-    frames: Dict[str, pd.DataFrame] = {}
+    frames: dict[str, pd.DataFrame] = {}
 
     residual_paths, should_emit = _select_residual_paths(path)
     if should_emit:
@@ -245,48 +297,52 @@ def build_network_frames(path: Path, config: RunConfig) -> dict[str, pd.DataFram
 def build_station_frames(path: Path, config: RunConfig) -> dict[str, pd.DataFrame]:
     frames: dict[str, pd.DataFrame] = {}
 
-    print(f"  [parse_pde_cs]", end=" ", flush=True)
     pde_df = trace.parse_pde_cs(_line_iterator(path))
     if pde_df is not None:
         frames["station_pde_cs"] = _reset(pde_df)
-        print(f"{len(pde_df)} rows", flush=True)
+        logger.info("  [parse_pde_cs] %d rows", len(pde_df))
     else:
-        print("None", flush=True)
+        logger.info("  [parse_pde_cs] None")
 
-    print(f"  [parse_lc]", end=" ", flush=True)
     lc_df = trace.parse_lc(_line_iterator(path))
     if lc_df is not None:
         frames["station_lc"] = _reset(lc_df)
-        print(f"{len(lc_df)} rows", flush=True)
+        logger.info("  [parse_lc] %d rows", len(lc_df))
     else:
-        print("None", flush=True)
+        logger.info("  [parse_lc] None")
 
-    print(f"  [parse_detslp]", end=" ", flush=True)
     detslp_df = trace.parse_detslp(_line_iterator(path))
     if detslp_df is not None:
         frames["station_detslp"] = _reset(detslp_df)
-        print(f"{len(detslp_df)} rows", flush=True)
+        logger.info("  [parse_detslp] %d rows", len(detslp_df))
     else:
-        print("None", flush=True)
+        logger.info("  [parse_detslp] None")
 
-    print(f"  [parse_observations]", end=" ", flush=True)
     observations_df = trace.parse_observations(_line_iterator(path))
     if observations_df is not None:
         frames["station_observations"] = _reset(observations_df)
-        print(f"{len(observations_df)} rows", flush=True)
+        logger.info("  [parse_observations] %d rows", len(observations_df))
     else:
-        print("None", flush=True)
+        logger.info("  [parse_observations] None")
 
     return frames
 
 
-def write_frames(frames: dict[str, pd.DataFrame], base: str, config: RunConfig) -> list[str]:
+def _engine(config: RunConfig) -> ParquetEngine:
+    """config.engine comes straight from the CLI; pandas will raise its own
+    error at runtime if the user passed something other than these three."""
+    return cast(ParquetEngine, config.engine)
+
+
+def write_frames(
+    frames: dict[str, pd.DataFrame], base: str, config: RunConfig
+) -> list[str]:
     written: list[str] = []
     for suffix, df in frames.items():
         if df is None:
             df = pd.DataFrame()
         out_path = config.output_dir / f"{base}_{suffix}.parquet"
-        df.to_parquet(out_path, index=False, engine=config.engine)
+        df.to_parquet(out_path, index=False, engine=_engine(config))
         row_count = len(df)
         status = "empty" if row_count == 0 else f"{row_count} rows"
         written.append(f"{suffix} ({status}) -> {out_path}")
@@ -310,7 +366,9 @@ def process_trace_file(path: Path, config: RunConfig) -> list[str]:
         frames.update(build_station_frames(path, config))
 
     if not frames:
-        return [f"{path.name}: no data frames produced (classification={classification})"]
+        return [
+            f"{path.name}: no data frames produced (classification={classification})"
+        ]
 
     base = path.stem
     return write_frames(frames, base, config)
@@ -323,18 +381,19 @@ def process_pos_file(path: Path, config: RunConfig) -> list[str]:
 
     base = path.stem
     out_path = config.output_dir / f"{base}_pos.parquet"
-    df.to_parquet(out_path, index=False, engine=config.engine)
+    df.to_parquet(out_path, index=False, engine=_engine(config))
     row_count = len(df)
     status = "empty" if row_count == 0 else f"{row_count} rows"
     return [f"pos ({status}) -> {out_path}"]
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args() -> Args:
     parser = argparse.ArgumentParser(
         description="Extract TRACE and POS DataFrames and write them to Parquet."
     )
     parser.add_argument(
         "target",
+        type=Path,
         help="TRACE/POS file or directory containing TRACE/POS files (station date folder).",
     )
     parser.add_argument(
@@ -347,7 +406,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--engine",
         help="Optional pandas parquet engine (e.g. pyarrow, fastparquet).",
-        default="pyarrow"
+        default="pyarrow",
     )
     parser.add_argument(
         "--keep-raw-residuals",
@@ -364,25 +423,26 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Suppress per-file output messages.",
     )
-    return parser.parse_args()
+    namespace = parser.parse_args()
+    return Args(**vars(namespace))
 
 
 def main() -> None:
     args = parse_args()
-    target = Path(args.target).expanduser().resolve()
-    output_dir = Path(args.output_dir).expanduser().resolve()
+    target = args.target.expanduser().resolve()
+    output_dir = args.output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Searching for TRACE/POS files in: {target}", flush=True)
+    logger.info("Searching for TRACE/POS files in: %s", target)
 
     # Find both TRACE and POS files
     trace_files = find_trace_files(target, recursive=args.recursive)
     pos_files = find_pos_files(target, recursive=args.recursive)
 
-    print(f"Found {len(trace_files)} TRACE files, {len(pos_files)} POS files", flush=True)
+    logger.info("Found %d TRACE files, %d POS files", len(trace_files), len(pos_files))
 
     if not trace_files and not pos_files:
-        print(f"No TRACE or POS files found under {target}", file=sys.stderr)
+        logger.error("No TRACE or POS files found under %s", target)
         sys.exit(1)
 
     config = RunConfig(
@@ -395,25 +455,26 @@ def main() -> None:
     overall_written: list[str] = []
 
     for i, path in enumerate(trace_files, 1):
-        print(f"[{i}/{len(trace_files)}] TRACE: {path.name}", flush=True)
+        logger.info("[%d/%d] TRACE: %s", i, len(trace_files), path.name)
         written = process_trace_file(path, config)
         overall_written.extend(written)
         if not config.quiet:
             for entry in written:
-                print(f"  {entry}")
+                logger.info("  %s", entry)
 
     for i, path in enumerate(pos_files, 1):
-        print(f"[{i}/{len(pos_files)}] POS: {path.name}", flush=True)
+        logger.info("[%d/%d] POS: %s", i, len(pos_files), path.name)
         written = process_pos_file(path, config)
         overall_written.extend(written)
         if not config.quiet:
             for entry in written:
-                print(f"  {entry}")
+                logger.info("  %s", entry)
 
     if config.quiet:
         for entry in overall_written:
-            print(entry)
+            logger.info(entry)
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     main()
