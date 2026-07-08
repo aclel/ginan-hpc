@@ -42,13 +42,13 @@ $HOME/work/2019-01-01/products --this contains all of the required input product
 
 ### 3. Download RINEX files
 
-Create ~/.netrc ~/.netrc with Earthdata credentials for NASA CDDIS access:
+Create ~/.netrc with Earthdata credentials for NASA CDDIS access:
 
 ```
 machine urs.earthdata.nasa.gov login YOUR_USERNAME password YOUR_PASSWORD
 ```
 
-Edit and submit the download jobs:
+Submit download jobs (calls `auto_download_PPP.py` in the background):
 
 ```bash
 # Download RINEX observation files to work dir
