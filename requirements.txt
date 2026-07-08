@@ -1,4 +1,4 @@
 pandas
 pyarrow
 pyyaml
-gnssanalysis
+gnssanalysis @ git+https://github.com/aclel/gnssanalysis.git@working
