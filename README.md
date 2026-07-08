@@ -16,7 +16,7 @@ jobs/            PBS job templates (submit these with qsub)
 scripts/         Python and shell scripts (called by PBS jobs and directly)
 ```
 
-## Quickstart
+## Setup
 
 ### 1. Install Ginan
 
@@ -30,32 +30,65 @@ source env/bin/activate
 pip install -r requirements.txt  ## note that gnssanalysis uses Andrew Cleland fork until the TRACE file parsing is merged upstream
 ```
 
-### 3. Download data
+### 3. Source the product files you need
+
+Everyone may choose different products so I'll leave it up to you to get those into the working directory.
+
+The working directory contains all of the products and rinex for each date, and will eventually contain log files for all of the pea jobs that run.
+
+```
+$HOME/work/2019-01-01/products --this contains all of the required input products (orbits, clocks, biases, VMF3 grids, static files)
+```
+
+### 3. Download RINEX files
+
+Create ~/.netrc ~/.netrc with Earthdata credentials for NASA CDDIS access:
+
+```
+machine urs.earthdata.nasa.gov login YOUR_USERNAME password YOUR_PASSWORD
+```
 
 Edit and submit the download jobs:
 
 ```bash
-# Download IGS products (orbits, clocks, biases, VMF3 grids)
-qsub -v START=2024-01-01,END=2024-01-31,WORK_ROOT=/scratch/$USER/work jobs/download_products.pbs
-
-# Download RINEX observations
-qsub -v STATIONS=config/stations_example.txt,START=2024-01-01,END=2024-01-31,WORK_ROOT=/scratch/$USER/work jobs/download_rinex.pbs
+# Download RINEX observation files to work dir
+qsub -v START_DATE=2019-01-01,END_DATE=2019-01-31,STATIONS=config/stations_example.txt,WORK_ROOT=$HOME/work,GINAN_ROOT=$HOME/projects/ginan -l walltime=1:00:00 jobs/download_rinex.pbs
 ```
 
-### 5. Submit processing jobs
+### 4. Submit pea jobs
 
 ```bash
 python scripts/submit_batch.py \
     --regenerate-manifest \
-    --work-root $USER/work \
-    --parquet-output-dir $USER/parquet \
+    --work-root $HOME/work \
+    --parquet-output-dir $HOME/parquet \
     --config-file config/ppp_template.yaml \
     --mem 5000MB \
     --scratch-dir TMPDIR \
     --stations-file config/stations_example.txt \
     --submit-start-date 2019-01-01 \
-    --submit-end-date 2019-01-31 \
+    --submit-end-date 2019-01-31
 ```
+
+Check for the pea logs in workdir/2019-01-01/logs/ALIC.log for example.
+
+Check for output parquet files in output directory.
+
+## PBS commands
+
+Check current jobs with `qstat -a`
+
+To check all array jobs `qstat -Jt`
+
+Get info about a job after it's finished running `qstat -xf <job>`
+
+Delete a running job with `qdel <job>`
+
+## Pea workload
+
+When parallelised the pea is heavy on disk IO. Running in parallel saturates the disk. HPCs normally have fast scratch space available on the compute nodes. The pbs scripts are set up to write TRACE files and prepare outputs on this scratch disk and then write back to output dir when it's finished.
+
+During testing I also tried tmpfs (RAM backed filesystem). This may also be an option depending on whether the HPC you're using supports it.
 
 ## External dependencies
 
