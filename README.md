@@ -37,7 +37,17 @@ Everyone may choose different products so I'll leave it up to you to get those i
 The working directory contains all of the products and rinex for each date, and will eventually contain log files for all of the pea jobs that run.
 
 ```
-$HOME/work/2019-01-01/products --this contains all of the required input products (orbits, clocks, biases, VMF3 grids, static files)
+$HOME/work/2019-01-01/products --this contains all of the required input products (orbits, clocks, biases, VMF3 grids, static files symlinks)
+```
+
+You'll need to store the "static" products somewhere on HPC. I store them in home directory, and then in the dated folders I symlink back to these.
+
+```
+~/products_template/:
+finals.data.iau2000.txt  IGc20.ssc  igs20.atx  igs_satellite_metadata.snx  psd_IGc20.snx  tables
+
+~/products_template/tables:
+ALOAD_GO.BLQ  bds_yaw_modes.snx  DE436.1950.2050  gpt_25.grd  igrf13coeffs.txt  igrf14coeffs.txt  OLOAD_GO.BLQ  opoleloadcoefcmcor.txt  orography_ell_1x1.txt  qzss_yaw_modes.snx  sat_yaw_bias_rate.snx
 ```
 
 ### 3. Download RINEX files
