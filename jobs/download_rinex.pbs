@@ -20,6 +20,7 @@
 #   DECOMPRESS         Decompress .crx.gz after download: true/false (default: false)
 #   DELETE_COMPRESSED  Delete .crx.gz after decompression: true/false (default: false)
 #   GINAN_ROOT         Path to Ginan installation (default: ~/projects/ginan)
+#   VENV_PATH          Virtualenv to activate (default: ${GINAN_ROOT}/env)
 #   PROXY_URL          HTTP proxy for compute node internet access
 
 cd "$PBS_O_WORKDIR"
@@ -28,7 +29,9 @@ if command -v module &>/dev/null; then
     module load python/3.13.0-gcc-jd5
 fi
 
-VENV_PATH="${VENV_PATH:-$PBS_O_WORKDIR/env}"
+GINAN_ROOT="${GINAN_ROOT:-$HOME/projects/ginan}"
+
+VENV_PATH="${VENV_PATH:-${GINAN_ROOT}/env}"
 if [[ -f "${VENV_PATH}/bin/activate" ]]; then
     source "${VENV_PATH}/bin/activate"
 fi
@@ -49,7 +52,6 @@ RINEX_SOURCE="${RINEX_SOURCE:-cddis}"
 RINEX_WORKERS="${RINEX_WORKERS:-16}"
 DECOMPRESS="${DECOMPRESS:-false}"
 DELETE_COMPRESSED="${DELETE_COMPRESSED:-false}"
-GINAN_ROOT="${GINAN_ROOT:-$HOME/projects/ginan}"
 
 echo "Host: $(hostname)  Start: $(date)"
 echo "Dates: ${START_DATE} to ${END_DATE}  Stations: ${STATIONS}  Source: ${RINEX_SOURCE}"
